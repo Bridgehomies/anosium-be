@@ -13,9 +13,10 @@ class UserRepository(BaseRepository[User]):
         self, 
         db: Session, 
         tenant_id: Optional[int] = None,
-        current_user_id: Optional[int] = None
+        current_user_id: Optional[int] = None,
+        allow_unscoped: bool = False,
     ):
-        super().__init__(db, User, tenant_id, current_user_id)
+        super().__init__(db, User, tenant_id, current_user_id, allow_unscoped)
     
     def get_by_email(self, email: str) -> Optional[User]:
         """Get user by email"""

@@ -64,7 +64,7 @@ def get_current_user(
         )
     
     # Get user from database
-    user_repo = UserRepository(db)
+    user_repo = UserRepository(db, allow_unscoped=True)
     user = user_repo.get(user_id)
     
     if not user:
@@ -135,49 +135,46 @@ def get_current_tenant(
     
     return tenant
 
-def require_role(required_role: UserRole):
+def require_role(required_role):
     """
     Dependency factory for role-based access control
-    
+
     Args:
-        required_role: Minimum required role OR list of allowed roles
-        
+        required_role: a single UserRole for a hierarchical minimum-role
+            check ("this role or higher"), or a list[UserRole] for an
+            exact-match "any of these roles" check. The list case delegates
+            to require_any_role() so there is exactly one implementation of
+            that logic — it used to be duplicated here and could drift out
+            of sync with require_any_role's version.
+
     Returns:
         Dependency function
     """
+    if isinstance(required_role, list):
+        return require_any_role(required_role)
+
+    role_hierarchy = {
+        UserRole.SUPER_ADMIN: 5,
+        UserRole.CLINIC_ADMIN: 4,
+        UserRole.DOCTOR: 3,
+        UserRole.ACCOUNTANT: 2,
+        UserRole.RECEPTIONIST: 2,
+        UserRole.STAFF: 1,
+    }
+
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
-        # Define role hierarchy
-        role_hierarchy = {
-            UserRole.SUPER_ADMIN: 5,
-            UserRole.CLINIC_ADMIN: 4,
-            UserRole.DOCTOR: 3,
-            UserRole.ACCOUNTANT: 2,
-            UserRole.RECEPTIONIST: 2,
-            UserRole.STAFF: 1,
-        }
-        
-        if isinstance(required_role, list):
-            # Explicit list: user must hold one of the listed roles exactly.
-            # Return immediately on match — do NOT fall through to hierarchy.
-            if current_user.role in required_role:
-                return current_user
+        # Single role: hierarchical check (user level >= required level)
+        user_level = role_hierarchy.get(current_user.role, 0)
+        required_level = role_hierarchy.get(required_role, 0)
+
+        if user_level < required_level:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. One of {[r.value for r in required_role]} roles required."
+                detail=f"Insufficient permissions. {required_role.value} role required."
             )
-        else:
-            # Single role: hierarchical check (user level >= required level)
-            user_level = role_hierarchy.get(current_user.role, 0)
-            required_level = role_hierarchy.get(required_role, 0)
-            
-            if user_level < required_level:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Insufficient permissions. {required_role.value} role required."
-                )
-        
+
         return current_user
-    
+
     return role_checker
 
 
@@ -438,7 +435,7 @@ def get_tenant_from_jwt(
     if not user_id:
         return None
 
-    user_repo = UserRepository(db)
+    user_repo = UserRepository(db, allow_unscoped=True)
     user = user_repo.get(user_id)
     if not user or not user.is_active:
         return None

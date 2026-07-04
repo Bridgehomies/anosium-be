@@ -27,7 +27,7 @@ class AuthService(BaseService):
     
     def __init__(self, db: Session):
         super().__init__(db)
-        self.user_repo = UserRepository(db)
+        self.user_repo = UserRepository(db, allow_unscoped=True)
     
     def authenticate_user(self, email: str, password: str, ip_address: str = "0.0.0.0") -> Optional[User]:
         """
@@ -113,7 +113,7 @@ class AuthService(BaseService):
 
         # --- best-effort onboarding emails ---------------------------------
         try:
-            verification_token = create_email_verification_token(user.id)
+            verification_token = create_email_verification_token(user.email)
             dispatch_email(
                 "email_verification",
                 to_email=user.email,
@@ -441,20 +441,20 @@ class AuthService(BaseService):
             True if successful, False otherwise
         """
         from core.security import verify_email_verification_token
-        
-        user_id = verify_email_verification_token(token)
-        if not user_id:
+
+        email = verify_email_verification_token(token)
+        if not email:
             return False
-        
-        user = self.user_repo.get(user_id)
+
+        user = self.user_repo.get_by_email(email)
         if not user:
             return False
-        
+
         # Mark email as verified
-        self.user_repo.update(user_id, {'is_verified': True})
+        self.user_repo.update(user.id, {'is_verified': True})
         self.commit()
         
-        logger.info(f"Email verified for user {user_id}")
+        logger.info(f"Email verified for user {user.id}")
         
         return True
     

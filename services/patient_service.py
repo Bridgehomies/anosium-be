@@ -6,6 +6,7 @@ from repositories.patient import PatientRepository
 from repositories.appointment import AppointmentRepository
 from repositories.visit import VisitRepository
 from repositories.billing import InvoiceRepository
+from repositories.tenant import TenantRepository
 from schemas.patient import PatientCreate, PatientUpdate
 from models.patient import Patient
 from services.base_service import BaseService
@@ -25,6 +26,7 @@ class PatientService(BaseService):
         self.appointment_repo = AppointmentRepository(db, tenant_id, current_user_id)
         self.visit_repo = VisitRepository(db, tenant_id, current_user_id)
         self.invoice_repo = InvoiceRepository(db, tenant_id, current_user_id)
+        self.tenant_repo = TenantRepository(db, current_user_id)
 
     # services/patient_service.py
     def create_patient(self, patient_in: PatientCreate) -> Patient:
@@ -178,4 +180,4 @@ class PatientService(BaseService):
         filters: Dict[str, Any] = {}
         if gender:
             filters["gender"] = gender
-        return self.patient_repo.get_multi(0, 100, filters)
+        return self.patient_repo.get_multi(0, 100, filters) 

@@ -16,7 +16,7 @@ class TenantService(BaseService):
     def __init__(self, db: Session, current_user_id: Optional[int] = None):
         super().__init__(db, current_user_id=current_user_id)
         self.tenant_repo = TenantRepository(db, current_user_id)
-        self.user_repo = UserRepository(db)
+        self.user_repo = UserRepository(db, allow_unscoped=True)
     
     def create_tenant(self, tenant_in: TenantCreate) -> Tenant:
         """Create new tenant with admin user"""

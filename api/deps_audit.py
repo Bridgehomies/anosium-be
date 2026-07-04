@@ -22,11 +22,11 @@ Or with request context (IP address):
         audit(patient_id)   # call after you know which patient was accessed
 """
 
-from typing import Optional
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from api.deps import get_db, get_current_user, get_current_tenant
+from core.request_utils import get_client_ip
 from models.user import User
 from models.tenant import Tenant
 from repositories.audit import DataAccessLogRepository
@@ -58,7 +58,7 @@ def log_patient_read(
             access_type="read",
             accessed_fields=None,           # field-level tracking added when needed
             purpose="api_read",
-            ip_address=_get_ip(request),
+            ip_address=get_client_ip(request),
         )
         db.flush()
     except Exception:
@@ -67,11 +67,3 @@ def log_patient_read(
             "DataAccessLog write failed for patient_id=%s user_id=%s",
             patient_id, current_user.id,
         )
-
-
-def _get_ip(request: Request) -> Optional[str]:
-    """Extract real client IP, honouring proxy headers."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else None

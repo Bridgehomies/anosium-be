@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: List[str] = ["*"]
     CORS_ALLOW_HEADERS: List[str] = ["*"]
+
+    # Trusted reverse proxies (IPs or CIDR ranges), e.g. your load balancer.
+    # X-Forwarded-For / X-Real-IP are attacker-controlled unless the request
+    # actually came through one of these — see core/request_utils.get_client_ip.
+    # Empty by default: forwarded headers are ignored until you configure this.
+    TRUSTED_PROXY_IPS: List[str] = Field(default_factory=list)
     
     # Database
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/hospital_db"
@@ -137,11 +143,19 @@ class Settings(BaseSettings):
     
     @validator("SECRET_KEY")
     def validate_secret_key(cls, v, values):
+        # The placeholder key is public (it's in this source file) — never
+        # acceptable in any environment, not just "production". Relying on
+        # ENVIRONMENT being set correctly is exactly the kind of one-missing-
+        # env-var mistake that ships a forgeable JWT signing key.
+        if v == "your-secret-key-change-in-production-min-32-chars":
+            raise ValueError(
+                "SECRET_KEY must be changed from its default value. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+
         if values.get("ENVIRONMENT") == "production":
             if len(v) < 32:
                 raise ValueError("SECRET_KEY must be at least 32 characters in production")
-            if v == "your-secret-key-change-in-production-min-32-chars":
-                raise ValueError("SECRET_KEY must be changed from default value in production")
         return v
     
     @validator("CORS_ORIGINS", pre=True)
@@ -162,6 +176,25 @@ class Settings(BaseSettings):
                 )
 
         raise ValueError("Invalid CORS_ORIGINS format")
+
+    @validator("TRUSTED_PROXY_IPS", pre=True)
+    def parse_trusted_proxy_ips(cls, v):
+        if isinstance(v, list):
+            return v
+
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if not isinstance(parsed, list):
+                    raise ValueError
+                return parsed
+            except Exception:
+                raise ValueError(
+                    "TRUSTED_PROXY_IPS must be a JSON array of IPs/CIDRs. "
+                    'Example: ["10.0.0.0/8","172.16.0.5"]'
+                )
+
+        raise ValueError("Invalid TRUSTED_PROXY_IPS format")
 
     
     class Config:

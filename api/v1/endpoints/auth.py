@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Body
 from sqlalchemy.orm import Session
 from datetime import timedelta
 import logging
@@ -9,19 +9,10 @@ from schemas.common import SuccessResponse
 from services.auth_service import AuthService
 from core.config import settings
 from core.limiter import limiter          # ← ADD 1
+from core.request_utils import get_client_ip
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def get_client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client else "0.0.0.0"
 
 
 def get_user_agent(request: Request) -> str:
@@ -88,7 +79,7 @@ async def login(
 @limiter.limit("30/minute")              # ← ADD 2
 async def refresh_token(
     request: Request,                    # ← ADD 3: was missing, needed by slowapi
-    refresh_token: str,
+    refresh_token: str = Body(..., embed=True),
     db: Session = Depends(deps.get_db)
 ):
     auth_service = AuthService(db)
@@ -118,7 +109,7 @@ async def logout(
 
 @router.post("/logout-device", response_model=SuccessResponse)
 async def logout_device(
-    refresh_token: str,
+    refresh_token: str = Body(..., embed=True),
     current_user: User = Depends(deps.get_current_user),
     db: Session = Depends(deps.get_db)
 ):
@@ -153,8 +144,8 @@ async def request_password_reset(
 @limiter.limit("10/minute")              # ← ADD 2
 async def reset_password(
     request: Request,                    # already present — no change needed
-    token: str,
-    new_password: str,
+    token: str = Body(...),
+    new_password: str = Body(...),
     db: Session = Depends(deps.get_db)
 ):
     auth_service = AuthService(db)
@@ -201,7 +192,7 @@ async def get_current_user_info(
 @limiter.limit("10/minute")              # ← ADD 2
 async def verify_email(
     request: Request,                    # ← ADD 3: was missing
-    token: str,
+    token: str = Body(..., embed=True),
     db: Session = Depends(deps.get_db)
 ):
     auth_service = AuthService(db)

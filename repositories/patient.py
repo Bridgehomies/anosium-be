@@ -80,10 +80,12 @@ class PatientRepository(BaseRepository[Patient]):
         self,
         min_age: Optional[int] = None,
         max_age: Optional[int] = None,
+        gender: Optional[str] = None,
+        search: Optional[str] = None,
         skip: int = 0,
         limit: int = 100
     ) -> List[Patient]:
-        """Get patients by age range"""
+        """Get patients by age range, optionally narrowed by gender and/or a name/phone/code/email search term"""
         today = date.today()
         
         conditions = []
@@ -94,6 +96,20 @@ class PatientRepository(BaseRepository[Patient]):
         if max_age is not None:
             min_birth_date = today.replace(year=today.year - max_age - 1)
             conditions.append(Patient.date_of_birth >= min_birth_date)
+        
+        if gender is not None:
+            conditions.append(Patient.gender == gender)
+        
+        if search:
+            conditions.append(
+                or_(
+                    Patient.first_name.ilike(f"%{search}%"),
+                    Patient.last_name.ilike(f"%{search}%"),
+                    Patient.phone.ilike(f"%{search}%"),
+                    Patient.patient_code.ilike(f"%{search}%"),
+                    Patient.email.ilike(f"%{search}%"),
+                )
+            )
         
         query = self.db.query(Patient)
         query = self._apply_tenant_filter(query)

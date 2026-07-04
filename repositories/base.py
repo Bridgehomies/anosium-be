@@ -84,11 +84,19 @@ class BaseRepository(Generic[ModelType]):
 
     Constructor parameter order
     ---------------------------
-    (db, model, tenant_id, current_user_id)
+    (db, model, tenant_id, current_user_id, allow_unscoped)
 
     Child repositories call::
 
         super().__init__(db, MyModel, tenant_id, current_user_id)
+
+    Tenant scoping is fail-closed by default: if the model has a tenant_id
+    column but no tenant_id was passed in, _apply_tenant_filter() raises
+    rather than silently returning cross-tenant data. The one legitimate
+    exception is looking a user up by primary key or email *before* their
+    tenant is known (login, token decode) — those call sites must pass
+    allow_unscoped=True explicitly so the intent is visible in the code,
+    not implicit in a None default.
     """
 
     def __init__(
@@ -97,21 +105,42 @@ class BaseRepository(Generic[ModelType]):
         model: Type[ModelType],
         tenant_id: Optional[int] = None,
         current_user_id: Optional[int] = None,
+        allow_unscoped: bool = False,
     ):
         self.db = db
         self.model = model
         self.tenant_id = tenant_id
         self.current_user_id = current_user_id
+        self.allow_unscoped = allow_unscoped
 
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
 
     def _apply_tenant_filter(self, query):
-        """Append a WHERE tenant_id = … clause when the model has that column."""
-        if hasattr(self.model, "tenant_id") and self.tenant_id is not None:
+        """Append a WHERE tenant_id = … clause when the model has that column.
+
+        Fails closed: a tenant-scoped model queried with no tenant_id raises
+        instead of silently returning every tenant's rows. Repositories doing
+        an intentionally global lookup (e.g. UserRepository during login,
+        before the tenant is known) must construct with allow_unscoped=True.
+        """
+        if not hasattr(self.model, "tenant_id"):
+            return query
+
+        if self.tenant_id is not None:
             return query.filter(self.model.tenant_id == self.tenant_id)
-        return query
+
+        if self.allow_unscoped:
+            return query
+
+        raise RuntimeError(
+            f"{self.__class__.__name__} queried {self.model.__tablename__} "
+            "(a tenant-scoped model) without a tenant_id and without "
+            "allow_unscoped=True. Pass the caller's tenant_id explicitly, or "
+            "construct with allow_unscoped=True if this lookup is "
+            "intentionally cross-tenant."
+        )
 
     @staticmethod
     def _serialize_values(values: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -21,7 +21,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         True if password matches, False otherwise
     """
     try:
-        password_bytes = plain_password.encode('utf-8')
+        # Must truncate the same way get_password_hash does. bcrypt (pyca/bcrypt
+        # >=4.0) raises ValueError for inputs over 72 bytes on both hashpw and
+        # checkpw — without matching truncation here, any password whose UTF-8
+        # encoding exceeds 72 bytes raises inside checkpw, gets swallowed by the
+        # except below, and always returns False, even for the correct password.
+        password_bytes = plain_password.encode('utf-8')[:72]
         hashed_bytes = hashed_password.encode('utf-8')
         return bcrypt.checkpw(password_bytes, hashed_bytes)
     except Exception:
@@ -39,7 +44,8 @@ def get_password_hash(password: str) -> str:
         Hashed password
         
     Note:
-        bcrypt has a 72-byte limit. We truncate if needed.
+        bcrypt has a 72-byte limit. We truncate if needed — verify_password
+        truncates identically so hashing and verification stay consistent.
     """
     # Truncate to 72 bytes (bcrypt limit)
     password_bytes = password.encode('utf-8')[:72]
@@ -112,23 +118,6 @@ def verify_token_type(token_payload: Dict[str, Any], expected_type: str) -> bool
     return token_payload.get("type") == expected_type
 
 
-def is_token_expired(token_payload: Dict[str, Any]) -> bool:
-    """
-    Check if token is expired
-    
-    Args:
-        token_payload: Decoded token payload
-        
-    Returns:
-        True if token is expired, False otherwise
-    """
-    exp = token_payload.get("exp")
-    if not exp:
-        return True
-    
-    return datetime.fromtimestamp(exp) < datetime.utcnow()
-
-
 def extract_user_id_from_token(token: str) -> Optional[int]:
     """
     Extract user ID from token
@@ -193,3 +182,21 @@ def create_email_verification_token(email: str) -> str:
     expire = datetime.utcnow() + timedelta(hours=24)
     payload = {"sub": email, "exp": expire, "type": "email_verification"}
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_email_verification_token(token: str) -> Optional[str]:
+    """
+    Decode an email-verification token created by create_email_verification_token.
+
+    Returns:
+        The email address embedded in the token ("sub" claim), or None if the
+        token is invalid, expired, or not of type "email_verification".
+    """
+    payload = decode_token(token)
+    if not payload:
+        return None
+
+    if not verify_token_type(payload, "email_verification"):
+        return None
+
+    return payload.get("sub")
