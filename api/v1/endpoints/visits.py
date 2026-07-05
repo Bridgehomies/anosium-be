@@ -14,6 +14,22 @@ from models.tenant import Tenant
 
 router = APIRouter()    
 
+
+def _ensure_doctor_owns_visit(visit, current_user: User) -> None:
+    """
+    A DOCTOR-role user may only act on their own visits — everyone else
+    (Clinic Admin, Super Admin) can manage any doctor's visits. Mirrors
+    list_visits' existing doctor filter and appointments.py's equivalent
+    check. Without this, any Doctor account could edit or complete a
+    colleague's patient visit note.
+    """
+    if current_user.role == UserRole.DOCTOR:
+        if not current_user.doctor_profile or current_user.doctor_profile.id != visit.doctor_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Can only manage your own visits"
+            )
+
 @router.post("", response_model=Visit, status_code=status.HTTP_201_CREATED)
 async def create_visit(
     visit_in: VisitCreate,
@@ -116,6 +132,14 @@ async def update_visit(
     """
     service = VisitService(db, current_tenant.id, current_user.id)
     
+    existing = service.get_visit_with_details(visit_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Visit not found"
+        )
+    _ensure_doctor_owns_visit(existing, current_user)
+    
     visit = service.update_visit(visit_id, visit_in)
     
     if not visit:
@@ -152,6 +176,14 @@ async def complete_visit(
     Mark visit as completed
     """
     service = VisitService(db, current_tenant.id, current_user.id)
+    
+    existing = service.get_visit_with_details(visit_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Visit not found"
+        )
+    _ensure_doctor_owns_visit(existing, current_user)
     
     visit = service.complete_visit(visit_id)
     

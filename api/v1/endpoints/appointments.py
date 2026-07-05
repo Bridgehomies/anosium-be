@@ -13,11 +13,29 @@ from schemas.appointment import (
 )
 from schemas.common import PaginatedResponse, SuccessResponse
 from services.appointment_service import AppointmentService
-from models.user import User
+from models.user import User, UserRole
 from models.tenant import Tenant
 from models.appointment import AppointmentStatus
 
 router = APIRouter()
+
+
+def _ensure_doctor_owns_appointment(appointment, current_user: User) -> None:
+    """
+    A DOCTOR-role user may only act on their own appointments. Every other
+    role (front-desk/admin) can manage any doctor's appointments — this
+    mirrors the ownership pattern already used in doctors.py's
+    toggle_availability and visits.py's list_visits doctor filter.
+
+    Without this, any Doctor account could check-in, complete, cancel,
+    reschedule, or edit a colleague's appointment.
+    """
+    if current_user.role == UserRole.DOCTOR:
+        if not current_user.doctor_profile or current_user.doctor_profile.id != appointment.doctor_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Can only manage your own appointments"
+            )
 
 @router.post("", response_model=Appointment, status_code=status.HTTP_201_CREATED)
 async def create_appointment(
@@ -165,6 +183,14 @@ async def update_appointment(
     """
     service = AppointmentService(db, current_tenant.id, current_user.id)
     
+    existing = service.get_appointment(appointment_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    _ensure_doctor_owns_appointment(existing, current_user)
+    
     try:
         appointment = service.update_appointment(appointment_id, appointment_in)
         
@@ -193,6 +219,14 @@ async def reschedule_appointment(
     Reschedule appointment to new date/time
     """
     service = AppointmentService(db, current_tenant.id, current_user.id)
+    
+    existing = service.get_appointment(appointment_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    _ensure_doctor_owns_appointment(existing, current_user)
     
     try:
         appointment = service.reschedule_appointment(appointment_id, reschedule_data)
@@ -223,6 +257,14 @@ async def cancel_appointment(
     """
     service = AppointmentService(db, current_tenant.id, current_user.id)
     
+    existing = service.get_appointment(appointment_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    _ensure_doctor_owns_appointment(existing, current_user)
+    
     success = service.cancel_appointment(appointment_id, cancel_data.cancellation_reason)
     
     if not success:
@@ -248,6 +290,14 @@ async def check_in_appointment(
     """
     service = AppointmentService(db, current_tenant.id, current_user.id)
     
+    existing = service.get_appointment(appointment_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    _ensure_doctor_owns_appointment(existing, current_user)
+    
     appointment = service.check_in_appointment(appointment_id)
     
     if not appointment:
@@ -269,6 +319,14 @@ async def complete_appointment(
     Mark appointment as completed
     """
     service = AppointmentService(db, current_tenant.id, current_user.id)
+    
+    existing = service.get_appointment(appointment_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Appointment not found"
+        )
+    _ensure_doctor_owns_appointment(existing, current_user)
     
     appointment = service.complete_appointment(appointment_id)
     

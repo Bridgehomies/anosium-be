@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -10,16 +10,19 @@ from schemas.notification import (
 )
 from schemas.common import PaginatedResponse, SuccessResponse
 from services.notification_service import NotificationService
-from models.user import User
+from models.user import User, UserRole
 from models.tenant import Tenant
 from models.notification import NotificationStatus, NotificationType
+from core.limiter import limiter
 
 router = APIRouter()
 
 # ========== NOTIFICATIONS ==========
 
 @router.post("", response_model=Notification, status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/minute")
 async def send_notification(
+    request: Request,                    # must be first param for slowapi
     notification_in: NotificationCreate,
     current_user: User = Depends(deps.get_current_user),
     current_tenant: Tenant = Depends(deps.get_current_tenant),
@@ -28,6 +31,19 @@ async def send_notification(
     """
     Send notification to user or patient
     """
+    # Only admins can direct a message at an arbitrary email/phone that
+    # isn't resolved from an existing user_id/patient_id in this tenant.
+    # Without this, any authenticated staff account (even the lowest-
+    # privilege role) could use the clinic's email/SMS senders to reach any
+    # address on the internet with attacker-controlled content — a spam/
+    # phishing-relay vector riding on the clinic's sending reputation.
+    if notification_in.recipient_email or notification_in.recipient_phone:
+        if current_user.role not in (UserRole.CLINIC_ADMIN, UserRole.SUPER_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only Clinic Admin or Super Admin can target an explicit email/phone"
+            )
+
     service = NotificationService(db, current_tenant.id, current_user.id)
     
     try:
@@ -133,7 +149,7 @@ async def mark_notification_read(
     """
     service = NotificationService(db, current_tenant.id, current_user.id)
     
-    success = service.mark_as_read(notification_id)
+    success = service.mark_as_read(notification_id, current_user.id)
     
     if not success:
         raise HTTPException(

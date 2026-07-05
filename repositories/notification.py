@@ -93,10 +93,19 @@ class NotificationRepository(BaseRepository[Notification]):
         
         return query.limit(limit).all()
     
-    def mark_as_read(self, notification_id: int) -> bool:
-        """Mark notification as read"""
+    def mark_as_read(self, notification_id: int, user_id: int) -> bool:
+        """
+        Mark notification as read.
+
+        Scoped to the requesting user_id as well as tenant — without this,
+        any user in the tenant could mark any other user's notification as
+        read just by guessing/incrementing notification_id.
+        """
         notification = self.get(notification_id)
         if not notification:
+            return False
+
+        if notification.user_id != user_id:
             return False
         
         notification.read_at = datetime.utcnow()

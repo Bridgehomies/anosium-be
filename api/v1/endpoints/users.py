@@ -12,6 +12,48 @@ from models.tenant import Tenant
 
 router = APIRouter()
 
+
+def _get_target_user_or_403(
+    service: UserService,
+    user_id: int,
+    current_user: UserModel,
+    current_tenant: Tenant,
+    action: str,
+) -> User:
+    """
+    Fetch the target user for an admin action on another account, enforcing:
+      - target must exist (404)
+      - non-super-admins can't act on users outside their own tenant (403)
+      - non-super-admins can't act on Super Admin / Clinic Admin accounts (403)
+
+    Single implementation used by every endpoint that mutates another
+    user's account (role, active status, permissions, activity, welcome
+    email, password reset) — previously this check was duplicated in some
+    endpoints and simply missing from others (activate/deactivate/
+    permissions/activity/welcome-email/role), which let a Clinic Admin
+    deactivate, reassign, or even demote a Super Admin's account.
+    """
+    target_user = service.get_user(user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    if current_user.role != UserRole.SUPER_ADMIN:
+        if target_user.tenant_id != current_tenant.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot {action} users from other tenants"
+            )
+        if target_user.role in (UserRole.SUPER_ADMIN, UserRole.CLINIC_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot {action} admin users"
+            )
+
+    return target_user
+
 @router.post("", response_model=User, status_code=status.HTTP_201_CREATED)
 async def create_user(
     user_in: UserCreate,
@@ -47,8 +89,13 @@ async def create_user(
     service = UserService(db, current_tenant.id, current_user.id)
     
     try:
-        # Set tenant_id for non-super-admin users
-        if not user_in.tenant_id:
+        # Non-super-admins can only ever create users in their own tenant —
+        # overwrite (don't merely default) any client-supplied tenant_id, or
+        # a Clinic Admin could pass someone else's tenant_id in the request
+        # body and create a user inside a tenant they don't administer.
+        if current_user.role != UserRole.SUPER_ADMIN:
+            user_in.tenant_id = current_tenant.id
+        elif not user_in.tenant_id:
             user_in.tenant_id = current_tenant.id
         
         user = service.create_user(user_in)
@@ -209,27 +256,7 @@ async def update_user(
     """
     service = UserService(db, current_tenant.id, current_user.id)
     
-    # Check if target user belongs to same tenant
-    target_user = service.get_user(user_id)
-    if not target_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    if current_user.role != UserRole.SUPER_ADMIN:
-        if target_user.tenant_id != current_tenant.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot update users from other tenants"
-            )
-        
-        # Prevent clinic admins from modifying super admins
-        if target_user.role == UserRole.SUPER_ADMIN:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot update super admin users"
-            )
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "update")
     
     user = service.update_user(user_id, user_in)
     
@@ -265,25 +292,7 @@ async def delete_user(
         )
     
     # Check if target user belongs to same tenant
-    target_user = service.get_user(user_id)
-    if not target_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    if current_user.role != UserRole.SUPER_ADMIN:
-        if target_user.tenant_id != current_tenant.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot delete users from other tenants"
-            )
-        
-        if target_user.role == UserRole.SUPER_ADMIN:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot delete super admin users"
-            )
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "delete")
     
     success = service.delete_user(user_id)
     
@@ -312,6 +321,8 @@ async def activate_user(
     **Required Permissions:** Clinic Admin or Super Admin
     """
     service = UserService(db, current_tenant.id, current_user.id)
+    
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "activate")
     
     success = service.activate_user(user_id)
     
@@ -346,6 +357,8 @@ async def deactivate_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot deactivate your own account"
         )
+    
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "deactivate")
     
     success = service.deactivate_user(user_id)
     
@@ -387,7 +400,7 @@ async def change_user_role(
             detail="Cannot change your own role"
         )
     
-    # Role permission checks
+    # Role permission checks (based on the NEW role being assigned)
     if new_role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -399,6 +412,12 @@ async def change_user_role(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only super admins can assign clinic admin role"
         )
+    
+    # Role permission check (based on the target's CURRENT role) — without
+    # this, a Clinic Admin could demote an existing Super Admin or another
+    # Clinic Admin down to e.g. STAFF, since only the requested new_role was
+    # being checked above, never who was being changed.
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "change the role of")
     
     try:
         user = service.change_user_role(user_id, new_role)
@@ -441,6 +460,8 @@ async def update_user_permissions(
     """
     service = UserService(db, current_tenant.id, current_user.id)
     
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "edit permissions for")
+    
     user = service.update_user_permissions(user_id, permissions)
     
     if not user:
@@ -471,6 +492,8 @@ async def get_user_activity(
     """
     service = UserService(db, current_tenant.id, current_user.id)
     
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "view activity for")
+    
     activity = service.get_user_activity(user_id, days=days)
     
     if not activity:
@@ -499,25 +522,7 @@ async def admin_reset_user_password(
     service = UserService(db, current_tenant.id, current_user.id)
     
     # Validate target user
-    target_user = service.get_user(user_id)
-    if not target_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    if current_user.role != UserRole.SUPER_ADMIN:
-        if target_user.tenant_id != current_tenant.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot reset password for users from other tenants"
-            )
-        
-        if target_user.role in [UserRole.SUPER_ADMIN, UserRole.CLINIC_ADMIN]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot reset admin passwords"
-            )
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "reset the password for")
     
     success = service.admin_reset_password(user_id, body.new_password)
     
@@ -547,6 +552,8 @@ async def send_welcome_email(
     **Use case:** Resend welcome email if initial email was missed
     """
     service = UserService(db, current_tenant.id, current_user.id)
+    
+    _get_target_user_or_403(service, user_id, current_user, current_tenant, "send email to")
     
     success = service.send_welcome_email(user_id)
     

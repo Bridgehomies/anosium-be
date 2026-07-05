@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -11,11 +11,14 @@ from schemas.common import PaginatedResponse, SuccessResponse
 from services.tenant_service import TenantService
 from models.user import User, UserRole
 from models.tenant import SubscriptionTier, SubscriptionStatus
+from core.limiter import limiter
 
 router = APIRouter()
 
 @router.post("", response_model=Tenant, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/minute")
 async def create_tenant(
+    request: Request,                    # must be first param for slowapi
     tenant_in: TenantCreate,
     db: Session = Depends(deps.get_db)
 ):

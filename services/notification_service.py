@@ -200,10 +200,22 @@ class NotificationService:
 
         if not email or not phone:
             source = None
+            # Tenant-scoped: without this filter, any user_id/patient_id
+            # (including ones belonging to a different tenant) would resolve
+            # to a real contact and receive a message — a cross-tenant IDOR,
+            # not just a same-tenant privacy issue.
             if user_id:
-                source = self.db.query(User).filter(User.id == user_id).first()
+                source = (
+                    self.db.query(User)
+                    .filter(User.id == user_id, User.tenant_id == self.tenant_id)
+                    .first()
+                )
             elif patient_id:
-                source = self.db.query(Patient).filter(Patient.id == patient_id).first()
+                source = (
+                    self.db.query(Patient)
+                    .filter(Patient.id == patient_id, Patient.tenant_id == self.tenant_id)
+                    .first()
+                )
 
             if source:
                 if not email and hasattr(source, "email"):
@@ -557,8 +569,8 @@ class NotificationService:
     # read-status mutations
     # ==================================================================
 
-    def mark_as_read(self, notification_id: int) -> bool:
-        success = self.notification_repo.mark_as_read(notification_id)
+    def mark_as_read(self, notification_id: int, user_id: int) -> bool:
+        success = self.notification_repo.mark_as_read(notification_id, user_id)
         if success:
             self.db.commit()
         return success

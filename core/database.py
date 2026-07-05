@@ -1,219 +1,249 @@
 """
-Security utilities for authentication and authorization
-FIXED: Using bcrypt directly instead of passlib for better compatibility
+Database connection and session management
 """
 
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-import bcrypt
-from jose import JWTError, jwt
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import NullPool, QueuePool
+from typing import Generator
+import logging
 from core.config import settings
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
+read_engine = create_engine(
+    settings.DATABASE_READ_URL or settings.DATABASE_URL,
+    pool_pre_ping=True,
+    **({
+        "poolclass": QueuePool,
+        "pool_size": settings.DATABASE_POOL_SIZE,
+        "max_overflow": settings.DATABASE_MAX_OVERFLOW,
+    } if settings.ENVIRONMENT == "production" else {"poolclass": NullPool})
+)
+
+ReadSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=read_engine)
+
+def get_read_db() -> Generator[Session, None, None]:
+    db = ReadSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Create SQLAlchemy engine
+engine_kwargs = {
+    "echo": settings.DEBUG,
+    "pool_pre_ping": True,
+}
+
+if settings.ENVIRONMENT == "production":
+    engine_kwargs.update(
+        {
+            "poolclass": QueuePool,
+            "pool_size": settings.DATABASE_POOL_SIZE,
+            "max_overflow": settings.DATABASE_MAX_OVERFLOW,
+            "pool_timeout": settings.DATABASE_POOL_TIMEOUT,
+            "pool_recycle": settings.DATABASE_POOL_RECYCLE,
+        }
+    )
+else:
+    engine_kwargs.update(
+        {
+            "poolclass": NullPool,
+        }
+    )
+
+engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
+
+# Create SessionLocal class
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
+
+# Create Base class for models
+Base = declarative_base()
+
+
+# Database session dependency
+def get_db() -> Generator[Session, None, None]:
     """
-    Verify a plain password against a hashed password
+    Database session dependency for FastAPI
     
-    Args:
-        plain_password: Plain text password
-        hashed_password: Hashed password from database
+    Yields:
+        Database session
         
-    Returns:
-        True if password matches, False otherwise
+    Usage:
+        @app.get("/items")
+        def get_items(db: Session = Depends(get_db)):
+            ...
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# Event listeners for connection management
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_conn, connection_record):
+    """
+    Set SQLite pragmas on connect (if using SQLite)
+    """
+    if "sqlite" in settings.DATABASE_URL:
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
+@event.listens_for(engine, "checkout")
+def receive_checkout(dbapi_conn, connection_record, connection_proxy):
+    """
+    Log database connection checkout
+    """
+    if settings.DEBUG:
+        logger.debug("Connection checked out from pool")
+
+
+@event.listens_for(engine, "checkin")
+def receive_checkin(dbapi_conn, connection_record):
+    """
+    Log database connection checkin
+    """
+    if settings.DEBUG:
+        logger.debug("Connection returned to pool")
+
+
+# Database initialization
+def init_db():
+    """
+    Initialize database tables
+    
+    Creates all tables defined in models.
+    Should only be called once during application setup.
     """
     try:
-        # Must truncate the same way get_password_hash does. bcrypt (pyca/bcrypt
-        # >=4.0) raises ValueError for inputs over 72 bytes on both hashpw and
-        # checkpw — without matching truncation here, any password whose UTF-8
-        # encoding exceeds 72 bytes raises inside checkpw, gets swallowed by the
-        # except below, and always returns False, even for the correct password.
-        password_bytes = plain_password.encode('utf-8')[:72]
-        hashed_bytes = hashed_password.encode('utf-8')
-        return bcrypt.checkpw(password_bytes, hashed_bytes)
-    except Exception:
+        # Import all models here to ensure they're registered with Base
+        from models import (
+            tenant, user, patient, doctor, department,
+            appointment, visit, service, billing,
+            ai_lead, notification, audit, analytics  # ✅ Only existing models
+        )
+       
+        # Remove these - they don't exist:
+        # security, compliance, backup, integration
+        
+        # Create all tables
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created successfully")
+        
+    except Exception as e:
+        logger.error(f"Error initializing database: {str(e)}")
+        raise
+
+
+def drop_db():
+    """
+    Drop all database tables
+    
+    WARNING: This will delete all data!
+    Should only be used in development/testing.
+    """
+    if settings.ENVIRONMENT == "production":
+        raise RuntimeError("Cannot drop database in production environment")
+    
+    try:
+        Base.metadata.drop_all(bind=engine)
+        logger.warning("All database tables dropped")
+    except Exception as e:
+        logger.error(f"Error dropping database: {str(e)}")
+        raise
+
+
+def check_db_connection() -> bool:
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+        logger.info("Database connection successful")
+        return True
+    except Exception as e:
+        logger.error(f"Database connection failed: {str(e)}")
         return False
 
 
-def get_password_hash(password: str) -> str:
+def get_db_info() -> dict:
     """
-    Hash a password using bcrypt
+    Get database connection information
     
-    Args:
-        password: Plain text password
-        
     Returns:
-        Hashed password
-        
-    Note:
-        bcrypt has a 72-byte limit. We truncate if needed — verify_password
-        truncates identically so hashing and verification stay consistent.
+        Dictionary with database info
     """
-    # Truncate to 72 bytes (bcrypt limit)
-    password_bytes = password.encode('utf-8')[:72]
+    return {
+        "url": settings.DATABASE_URL.split("@")[-1],  # Hide credentials
+        "pool_size": settings.DATABASE_POOL_SIZE,
+        "max_overflow": settings.DATABASE_MAX_OVERFLOW,
+        "pool_timeout": settings.DATABASE_POOL_TIMEOUT,
+        "pool_recycle": settings.DATABASE_POOL_RECYCLE,
+        "environment": settings.ENVIRONMENT,
+    }
+
+
+# Context manager for database sessions
+class DatabaseSession:
+    """
+    Context manager for database sessions
     
-    salt = bcrypt.gensalt(rounds=12)
-    hashed = bcrypt.hashpw(password_bytes, salt)
-    return hashed.decode('utf-8')
-
-def validate_password_strength(password: str) -> tuple[bool, Optional[str]]:
+    Usage:
+        with DatabaseSession() as db:
+            # Use db session
+            user = db.query(User).first()
     """
-    Validate password strength based on configured requirements
     
-    Args:
-        password: Password to validate
-        
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
-    if len(password) < settings.PASSWORD_MIN_LENGTH:
-        return False, f"Password must be at least {settings.PASSWORD_MIN_LENGTH} characters long"
+    def __enter__(self) -> Session:
+        self.db = SessionLocal()
+        return self.db
     
-    if settings.PASSWORD_REQUIRE_UPPERCASE and not any(c.isupper() for c in password):
-        return False, "Password must contain at least one uppercase letter"
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.db.rollback()
+        self.db.close()
+
+
+# Transaction context manager
+class Transaction:
+    """
+    Context manager for database transactions
     
-    if settings.PASSWORD_REQUIRE_LOWERCASE and not any(c.islower() for c in password):
-        return False, "Password must contain at least one lowercase letter"
+    Usage:
+        with Transaction() as db:
+            # All operations in this block will be in a transaction
+            user = User(...)
+            db.add(user)
+            # Transaction will be committed automatically
+            # or rolled back if an exception occurs
+    """
     
-    if settings.PASSWORD_REQUIRE_DIGIT and not any(c.isdigit() for c in password):
-        return False, "Password must contain at least one digit"
+    def __init__(self, db: Session = None):
+        self.db = db or SessionLocal()
+        self.should_close = db is None
     
-    if settings.PASSWORD_REQUIRE_SPECIAL:
-        special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?"
-        if not any(c in special_chars for c in password):
-            return False, "Password must contain at least one special character"
+    def __enter__(self) -> Session:
+        return self.db
     
-    return True, None
-
-def decode_token(token: str) -> Optional[Dict[str, Any]]:
-    """
-    Decode and verify JWT token
-    
-    Args:
-        token: JWT token to decode
-        
-    Returns:
-        Decoded token payload or None if invalid
-    """
-    try:
-        payload = jwt.decode(
-            token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM]
-        )
-        return payload
-    except JWTError:
-        return None
-
-
-def verify_token_type(token_payload: Dict[str, Any], expected_type: str) -> bool:
-    """
-    Verify that token is of expected type (access or refresh)
-    
-    Args:
-        token_payload: Decoded token payload
-        expected_type: Expected token type ('access' or 'refresh')
-        
-    Returns:
-        True if token type matches, False otherwise
-    """
-    return token_payload.get("type") == expected_type
-
-
-def extract_user_id_from_token(token: str) -> Optional[int]:
-    """
-    Extract user ID from token
-    
-    Args:
-        token: JWT token
-        
-    Returns:
-        User ID or None if invalid
-    """
-    payload = decode_token(token)
-    if not payload:
-        return None
-    
-    return payload.get("user_id")
-
-
-def extract_tenant_id_from_token(token: str) -> Optional[int]:
-    """
-    Extract tenant ID from token
-    
-    Args:
-        token: JWT token
-        
-    Returns:
-        Tenant ID or None if invalid
-    """
-    payload = decode_token(token)
-    if not payload:
-        return None
-    
-    return payload.get("tenant_id")
-
-
-def hash_api_key(api_key: str) -> str:
-    """
-    Hash API key for storage
-    
-    Args:
-        api_key: Plain API key
-        
-    Returns:
-        Hashed API key
-    """
-    return get_password_hash(api_key)
-
-
-def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
-    """
-    Verify API key
-    
-    Args:
-        plain_api_key: Plain API key
-        hashed_api_key: Hashed API key from database
-        
-    Returns:
-        True if API key is valid, False otherwise
-    """
-    return verify_password(plain_api_key, hashed_api_key)
-
-def create_email_verification_token(email: str) -> str:
-    expire = datetime.utcnow() + timedelta(hours=24)
-    payload = {"sub": email, "exp": expire, "type": "email_verification"}
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-
-
-def verify_email_verification_token(token: str) -> Optional[str]:
-    """
-    Decode an email-verification token created by create_email_verification_token.
-
-    Returns:
-        The email address embedded in the token ("sub" claim), or None if the
-        token is invalid, expired, or not of type "email_verification".
-    """
-    payload = decode_token(token)
-    if not payload:
-        return None
-
-    if not verify_token_type(payload, "email_verification"):
-        return None
-
-    return payload.get("sub")
-
-def create_staff_password_reset_token(email: str) -> str:
-    """Create a time-limited token for staff password reset."""
-    expire = datetime.utcnow() + timedelta(hours=2)
-    payload = {"sub": email, "exp": expire, "type": "staff_password_reset"}
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-
-def verify_staff_password_reset_token(token: str) -> Optional[str]:
-    """Verify a staff password-reset token and return the email if valid."""
-    payload = decode_token(token)
-    if not payload:
-        return None
-
-    if not verify_token_type(payload, "staff_password_reset"):
-        return None
-
-    return payload.get("sub")
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is not None:
+                self.db.rollback()
+            else:
+                try:
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
+        finally:
+            if self.should_close:
+                self.db.close()
