@@ -1090,9 +1090,15 @@ class AnalyticsService:
         to_date: date
     ) -> Dict[str, int]:
         """Get patient distribution by age group"""
-        # Get patients who had visits in the period
-        patients_with_visits = (
-            self.db.query(Patient)
+        # Get patients who had visits in the period. We dedupe on Patient.id
+        # rather than calling .distinct() on the full Patient entity —
+        # Patient.medical_history is a plain Postgres JSON column (not
+        # JSONB), and JSON has no equality operator, so SELECT DISTINCT
+        # over the full row raises "could not identify an equality
+        # operator for type json". IDs are already unique once deduped,
+        # so no DISTINCT is needed on the second query at all.
+        patient_ids = (
+            self.db.query(Patient.id)
             .join(Visit, Visit.patient_id == Patient.id)
             .filter(
                 and_(
@@ -1103,6 +1109,12 @@ class AnalyticsService:
             )
             .distinct()
             .all()
+        )
+        patient_ids = [pid for (pid,) in patient_ids]
+
+        patients_with_visits = (
+            self.db.query(Patient).filter(Patient.id.in_(patient_ids)).all()
+            if patient_ids else []
         )
         
         age_groups = {
